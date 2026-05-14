@@ -8,6 +8,9 @@ Open-source pi extension for installing and using [camofox-browser](https://gith
 - `/camofox-stop` - stop it
 - `/camofox-status` - inspect install/server state
 - `/camofox-logs [limit]` - show recent structured server logs
+- `/camofox-traces <userId>` - list saved trace zips for a user
+- `/camofox-download-trace <userId> <filename> [outputPath]` - download a trace zip locally
+- `/camofox-delete-trace <userId> <filename>` - delete a saved trace zip
 
 ## Tools
 - `camofox_setup`
@@ -15,6 +18,9 @@ Open-source pi extension for installing and using [camofox-browser](https://gith
 - `camofox_stop`
 - `camofox_status`
 - `camofox_logs`
+- `camofox_list_traces`
+- `camofox_download_trace`
+- `camofox_delete_trace`
 - `camofox_create_tab`
 - `camofox_snapshot`
 - `camofox_click`
@@ -70,4 +76,5 @@ Load order:
 - First install/start may download the Camoufox browser payload via `camoufox-js`.
 - Default server URL: `http://127.0.0.1:9377`.
 - Proxy values are masked in status output.
-- Upstream Camofox emits structured JSON logs and supports anonymized crash/hang telemetry; this extension now exposes recent logs via `/camofox-logs` and `camofox_logs`.
+- Upstream Camofox emits structured JSON logs and supports anonymized crash/hang telemetry; this extension exposes recent logs via `/camofox-logs` and `camofox_logs`.
+- Session tracing is supported upstream via `trace: true` on `camofox_create_tab`; this extension now exposes trace listing, download, and deletion helpers.

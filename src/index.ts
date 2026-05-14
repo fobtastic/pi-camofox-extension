@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { mkdir, readFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const EXTENSION_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const INSTALL_DIR = join(homedir(), ".local", "share", "pi-camofox", "app");
 const CACHE_DIR = join(homedir(), ".cache", "pi-camofox");
+const TRACE_CACHE_DIR = join(CACHE_DIR, "traces");
 const PID_PATH = join(CACHE_DIR, "server.pid");
 const LOG_PATH = join(CACHE_DIR, "server.log");
 const DEFAULT_PORT = 9377;
@@ -292,6 +293,19 @@ async function api<T>(path: string, init: RequestInit = {}, signal?: AbortSignal
 	return text ? JSON.parse(text) as T : ({} as T);
 }
 
+async function downloadTrace(userId: string, filename: string, outputPath?: string, signal?: AbortSignal) {
+	const response = await fetch(`${getBaseUrl()}/sessions/${encodeURIComponent(userId)}/traces/${encodeURIComponent(filename)}`, { signal });
+	if (!response.ok) {
+		const text = await response.text();
+		throw new Error(text || `${response.status} ${response.statusText}`);
+	}
+	const buffer = Buffer.from(await response.arrayBuffer());
+	const path = outputPath || join(TRACE_CACHE_DIR, userId, filename);
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, buffer);
+	return { path, sizeBytes: buffer.byteLength, filename, userId };
+}
+
 async function refreshDisplay(pi: ExtensionAPI, ctx: ExtensionContext) {
 	if (!ctx.hasUI) return;
 	const status = await getServerStatus(pi, ctx.signal);
@@ -390,6 +404,46 @@ export default function camofoxExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("camofox-traces", {
+		description: "List saved trace files for a user",
+		handler: async (args, ctx) => {
+			const userId = args?.trim();
+			if (!userId) {
+				ctx.ui.notify("Usage: /camofox-traces <userId>", "error");
+				return;
+			}
+			const traces = await api(`/sessions/${encodeURIComponent(userId)}/traces`, {}, ctx.signal);
+			await refreshDisplay(pi, ctx);
+			ctx.ui.notify(JSON.stringify(traces, null, 2), "info");
+		},
+	});
+
+	pi.registerCommand("camofox-download-trace", {
+		description: "Download a saved trace zip: /camofox-download-trace <userId> <filename> [outputPath]",
+		handler: async (args, ctx) => {
+			const [userId, filename, ...rest] = (args || "").trim().split(/\s+/).filter(Boolean);
+			if (!userId || !filename) {
+				ctx.ui.notify("Usage: /camofox-download-trace <userId> <filename> [outputPath]", "error");
+				return;
+			}
+			const result = await downloadTrace(userId, filename, rest[0], ctx.signal);
+			ctx.ui.notify(`Downloaded trace to ${result.path}`, "info");
+		},
+	});
+
+	pi.registerCommand("camofox-delete-trace", {
+		description: "Delete a saved trace zip: /camofox-delete-trace <userId> <filename>",
+		handler: async (args, ctx) => {
+			const [userId, filename] = (args || "").trim().split(/\s+/).filter(Boolean);
+			if (!userId || !filename) {
+				ctx.ui.notify("Usage: /camofox-delete-trace <userId> <filename>", "error");
+				return;
+			}
+			const result = await api(`/sessions/${encodeURIComponent(userId)}/traces/${encodeURIComponent(filename)}`, { method: "DELETE" }, ctx.signal);
+			ctx.ui.notify(JSON.stringify(result, null, 2), "info");
+		},
+	});
+
 	pi.registerTool({
 		name: "camofox_setup",
 		label: "Camofox Setup",
@@ -451,6 +505,43 @@ export default function camofoxExtension(pi: ExtensionAPI) {
 				content: [{ type: "text", text: logs.available ? logs.text || "No log lines yet" : `No log file at ${LOG_PATH}` }],
 				details: logs,
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "camofox_list_traces",
+		label: "Camofox List Traces",
+		description: "List saved Playwright trace files for a user.",
+		parameters: Type.Object({ userId: Type.String() }),
+		async execute(_id, params, signal) {
+			const result = await api(`/sessions/${encodeURIComponent(params.userId)}/traces`, {}, signal);
+			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "camofox_download_trace",
+		label: "Camofox Download Trace",
+		description: "Download a saved Playwright trace zip to a local file path.",
+		parameters: Type.Object({
+			userId: Type.String(),
+			filename: Type.String(),
+			outputPath: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params, signal) {
+			const result = await downloadTrace(params.userId, params.filename, params.outputPath, signal);
+			return { content: [{ type: "text", text: `Downloaded trace to ${result.path}` }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "camofox_delete_trace",
+		label: "Camofox Delete Trace",
+		description: "Delete a saved Playwright trace zip from the Camofox server.",
+		parameters: Type.Object({ userId: Type.String(), filename: Type.String() }),
+		async execute(_id, params, signal) {
+			const result = await api(`/sessions/${encodeURIComponent(params.userId)}/traces/${encodeURIComponent(params.filename)}`, { method: "DELETE" }, signal);
+			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
 		},
 	});
 
