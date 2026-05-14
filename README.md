@@ -74,6 +74,7 @@ Load order:
 - The server package installed is `@askjo/camofox-browser`.
 - Initial setup also installs the optional `yt-dlp` dependency by default.
 - First install/start may download the Camoufox browser payload via `camoufox-js`.
+- On session start, the extension can prompt you to update an outdated local install or use a newer global `@askjo/camofox-browser` install for the current session.
 - Default server URL: `http://127.0.0.1:9377`.
 - Proxy values are masked in status output.
 - Upstream Camofox emits structured JSON logs and supports anonymized crash/hang telemetry; this extension exposes recent logs via `/camofox-logs` and `camofox_logs`.

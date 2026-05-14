@@ -35,6 +35,9 @@ const MANAGED_ENV_KEYS = [
 ] as const;
 
 let serverOwnedBySession = false;
+let installSourcePreference: "local" | "global" = "local";
+let globalPackagePath = "";
+let startupPackagePromptShown = false;
 
 function parseDotEnv(content: string) {
 	const values: Record<string, string> = {};
@@ -85,8 +88,73 @@ function getLocalPort() {
 	return Number(baseUrl.port || (baseUrl.protocol === "https:" ? 443 : 80));
 }
 
-function getServerScript() {
+function getLocalServerScript() {
 	return join(INSTALL_DIR, "node_modules", "@askjo", "camofox-browser", "server.js");
+}
+
+function getSelectedServerScript() {
+	return installSourcePreference === "global" && globalPackagePath
+		? join(globalPackagePath, "server.js")
+		: getLocalServerScript();
+}
+
+function compareVersions(a: string, b: string) {
+	const aParts = a.split(".").map((part) => Number(part) || 0);
+	const bParts = b.split(".").map((part) => Number(part) || 0);
+	for (let i = 0; i < Math.max(aParts.length, bParts.length); i += 1) {
+		const diff = (aParts[i] || 0) - (bParts[i] || 0);
+		if (diff !== 0) return diff;
+	}
+	return 0;
+}
+
+async function getLocalPackageInfo() {
+	const packageJsonPath = join(INSTALL_DIR, "node_modules", "@askjo", "camofox-browser", "package.json");
+	try {
+		const pkg = JSON.parse(await readFile(packageJsonPath, "utf8")) as { version?: string };
+		return {
+			installed: true,
+			version: pkg.version || "unknown",
+			packagePath: dirname(packageJsonPath),
+			serverScript: getLocalServerScript(),
+		};
+	} catch {
+		return { installed: false, version: undefined, packagePath: undefined, serverScript: getLocalServerScript() };
+	}
+}
+
+async function getGlobalPackageInfo(pi: ExtensionAPI, signal?: AbortSignal) {
+	const result = await pi.exec("bash", ["-lc", `pnpm list -g ${PACKAGE_NAME} --json`], { signal, timeout: 15000 });
+	if (result.code !== 0 || !result.stdout.trim()) {
+		return { installed: false, version: undefined, packagePath: undefined, serverScript: undefined };
+	}
+	try {
+		const parsed = JSON.parse(result.stdout) as Array<{
+			dependencies?: Record<string, { version?: string; path?: string }>;
+		}>;
+		const info = parsed[0]?.dependencies?.[PACKAGE_NAME];
+		if (!info?.path) return { installed: false, version: undefined, packagePath: undefined, serverScript: undefined };
+		return {
+			installed: true,
+			version: info.version || "unknown",
+			packagePath: info.path,
+			serverScript: join(info.path, "server.js"),
+		};
+	} catch {
+		return { installed: false, version: undefined, packagePath: undefined, serverScript: undefined };
+	}
+}
+
+async function getLatestPackageVersion(pi: ExtensionAPI, signal?: AbortSignal) {
+	const result = await pi.exec("bash", ["-lc", `npm view ${PACKAGE_NAME} version`], { signal, timeout: 15000 });
+	return result.code === 0 ? result.stdout.trim() : undefined;
+}
+
+async function getPackageState(pi: ExtensionAPI, signal?: AbortSignal) {
+	const [local, global] = await Promise.all([getLocalPackageInfo(), getGlobalPackageInfo(pi, signal)]);
+	const latest = await getLatestPackageVersion(pi, signal);
+	if (global.packagePath) globalPackagePath = global.packagePath;
+	return { local, global, latest };
 }
 
 function getProxyUrl() {
@@ -177,8 +245,9 @@ function withDefaultTrace<T extends { trace?: boolean }>(params: T): T & { trace
 }
 
 async function isInstalled(pi: ExtensionAPI, signal?: AbortSignal) {
-	const result = await pi.exec("bash", ["-lc", `[ -f ${JSON.stringify(getServerScript())} ]`], { signal, timeout: 5000 });
-	return result.code === 0;
+	const state = await getPackageState(pi, signal);
+	const selected = installSourcePreference === "global" ? state.global : state.local;
+	return !!selected.installed;
 }
 
 async function hasYtDlp(pi: ExtensionAPI, signal?: AbortSignal) {
@@ -199,13 +268,16 @@ async function installCamofox(pi: ExtensionAPI, signal?: AbortSignal, force = fa
 	].join("\n");
 	const result = await pi.exec("bash", ["-lc", script], { signal, timeout: 1800_000 });
 	if (result.code !== 0) throw new Error((result.stderr || result.stdout || "camofox install failed").trim());
-	return { installDir: INSTALL_DIR, serverScript: getServerScript(), baseUrl: getBaseUrl(), ytDlpInstalled: await hasYtDlp(pi, signal) };
+	installSourcePreference = "local";
+	return { installDir: INSTALL_DIR, serverScript: getLocalServerScript(), baseUrl: getBaseUrl(), ytDlpInstalled: await hasYtDlp(pi, signal) };
 }
 
 async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 	const proxy = getProxyConfig();
 	const telemetry = getTelemetryConfig();
 	const logs = await getRecentLogs(25);
+	const packages = await getPackageState(pi, signal);
+	const selectedPackage = installSourcePreference === "global" ? packages.global : packages.local;
 	let pid: number | undefined;
 	try {
 		pid = Number((await readFile(PID_PATH, "utf8")).trim());
@@ -219,7 +291,7 @@ async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 		}
 	}
 	return {
-		installed: await isInstalled(pi, signal),
+		installed: !!selectedPackage.installed,
 		ytDlpInstalled: await hasYtDlp(pi, signal),
 		running,
 		pid,
@@ -229,6 +301,12 @@ async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 		proxyEnabled: !!proxy,
 		proxy: proxy?.masked,
 		telemetry,
+		packageSource: installSourcePreference,
+		packageVersions: {
+			latest: packages.latest,
+			local: packages.local.version,
+			global: packages.global.version,
+		},
 		logs: {
 			available: logs.available,
 			errorCount: logs.errorCount,
@@ -243,7 +321,17 @@ async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 }
 
 async function startServer(pi: ExtensionAPI, signal?: AbortSignal) {
-	if (!(await isInstalled(pi, signal))) await installCamofox(pi, signal);
+	const packages = await getPackageState(pi, signal);
+	if (installSourcePreference === "global" && !packages.global.installed) {
+		installSourcePreference = "local";
+	}
+	if (installSourcePreference === "local" && !packages.local.installed) {
+		if (packages.global.installed) {
+			installSourcePreference = "global";
+		} else {
+			await installCamofox(pi, signal);
+		}
+	}
 	const status = await getServerStatus(pi, signal);
 	if (status.running) return { started: false, ...status };
 	await mkdir(CACHE_DIR, { recursive: true });
@@ -256,11 +344,13 @@ async function startServer(pi: ExtensionAPI, signal?: AbortSignal) {
 		if (proxy.password) envParts.push(`PROXY_PASSWORD=${shellQuote(proxy.password)}`);
 		if (proxy.bypass) envParts.push(`NO_PROXY=${shellQuote(proxy.bypass)}`);
 	}
+	const selectedScript = getSelectedServerScript();
+	const selectedDir = dirname(selectedScript);
 	const script = [
 		"set -euo pipefail",
 		`mkdir -p ${JSON.stringify(CACHE_DIR)}`,
-		`cd ${JSON.stringify(INSTALL_DIR)}`,
-		`nohup env ${envParts.join(" ")} node ${JSON.stringify(getServerScript())} >> ${JSON.stringify(LOG_PATH)} 2>&1 & echo $! > ${JSON.stringify(PID_PATH)}`,
+		`cd ${JSON.stringify(selectedDir)}`,
+		`nohup env ${envParts.join(" ")} node ${JSON.stringify(selectedScript)} >> ${JSON.stringify(LOG_PATH)} 2>&1 & echo $! > ${JSON.stringify(PID_PATH)}`,
 		"sleep 3",
 		`pid=$(cat ${JSON.stringify(PID_PATH)})`,
 		`kill -0 "$pid"`,
@@ -319,6 +409,8 @@ async function refreshDisplay(pi: ExtensionAPI, ctx: ExtensionContext) {
 	ctx.ui.setStatus("camofox", status.running ? "Camofox running" : status.installed ? "Camofox ready" : "Camofox not installed");
 	ctx.ui.setWidget("camofox-status", [
 		`Camofox install: ${status.installed ? "present" : "missing"}`,
+		`Package source: ${status.packageSource}`,
+		`Package versions: local=${status.packageVersions.local || "missing"} global=${status.packageVersions.global || "missing"} latest=${status.packageVersions.latest || "unknown"}`,
 		`yt-dlp: ${status.ytDlpInstalled ? "present" : "missing"}`,
 		`Camofox server: ${status.running ? `running (pid ${status.pid})` : "stopped"}`,
 		`Session ownership: ${serverOwnedBySession ? "session-owned" : "shared/external"}`,
@@ -331,10 +423,56 @@ async function refreshDisplay(pi: ExtensionAPI, ctx: ExtensionContext) {
 	]);
 }
 
+async function maybePromptForPackageChoice(pi: ExtensionAPI, ctx: ExtensionContext) {
+	if (!ctx.hasUI || startupPackagePromptShown) return;
+	startupPackagePromptShown = true;
+	const packages = await getPackageState(pi, ctx.signal);
+	const options: Array<{ label: string; action: "keep-local" | "update-local" | "use-global" }> = [];
+	if (packages.global.installed) {
+		options.push({
+			label: `Use global ${packages.global.version} for this session`,
+			action: "use-global",
+		});
+	}
+	if (packages.local.installed && packages.latest && compareVersions(packages.local.version || "0.0.0", packages.latest) < 0) {
+		options.push({
+			label: `Update local ${packages.local.version} -> ${packages.latest}`,
+			action: "update-local",
+		});
+	}
+	if (packages.local.installed) {
+		options.push({
+			label: `Keep local ${packages.local.version}`,
+			action: "keep-local",
+		});
+	}
+	const hasActionableChoice = options.some((option) => option.action !== "keep-local");
+	if (!hasActionableChoice) return;
+	const selected = await ctx.ui.select("Camofox package options", options.map((option) => option.label));
+	const choice = options.find((option) => option.label === selected);
+	if (!choice) return;
+	if (choice.action === "use-global" && packages.global.installed && packages.global.packagePath) {
+		installSourcePreference = "global";
+		globalPackagePath = packages.global.packagePath;
+		ctx.ui.notify(`Using global ${PACKAGE_NAME} ${packages.global.version}`, "info");
+	}
+	if (choice.action === "update-local") {
+		await installCamofox(pi, ctx.signal, true);
+		installSourcePreference = "local";
+		ctx.ui.notify(`Updated local ${PACKAGE_NAME} to latest`, "info");
+	}
+	if (choice.action === "keep-local") {
+		installSourcePreference = "local";
+	}
+	await refreshDisplay(pi, ctx);
+}
+
 export default function camofoxExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		serverOwnedBySession = false;
+		startupPackagePromptShown = false;
 		await refreshDisplay(pi, ctx);
+		await maybePromptForPackageChoice(pi, ctx);
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
 		if (serverOwnedBySession) {
