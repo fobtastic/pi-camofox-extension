@@ -169,6 +169,13 @@ function requireNavigateTarget(params: { url?: string; macro?: string }) {
 	}
 }
 
+function withDefaultTrace<T extends { trace?: boolean }>(params: T): T & { trace: boolean } {
+	return {
+		...params,
+		trace: params.trace ?? true,
+	};
+}
+
 async function isInstalled(pi: ExtensionAPI, signal?: AbortSignal) {
 	const result = await pi.exec("bash", ["-lc", `[ -f ${JSON.stringify(getServerScript())} ]`], { signal, timeout: 5000 });
 	return result.code === 0;
@@ -556,8 +563,12 @@ export default function camofoxExtension(pi: ExtensionAPI) {
 			trace: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_id, params, signal) {
-			const result = await api("/tabs", { method: "POST", body: JSON.stringify(params) }, signal);
-			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+			const request = withDefaultTrace(params);
+			const result = await api<{ tabId: string; url: string }>("/tabs", { method: "POST", body: JSON.stringify(request) }, signal);
+			return {
+				content: [{ type: "text", text: `Opened tab ${result.tabId} at ${result.url} (trace ${request.trace ? "enabled" : "disabled"})` }],
+				details: { ...result, trace: request.trace },
+			};
 		},
 	});
 

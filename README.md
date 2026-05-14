@@ -21,7 +21,7 @@ Open-source pi extension for installing and using [camofox-browser](https://gith
 - `camofox_list_traces`
 - `camofox_download_trace`
 - `camofox_delete_trace`
-- `camofox_create_tab`
+- `camofox_create_tab` (tracing enabled by default)
 - `camofox_snapshot`
 - `camofox_click`
 - `camofox_type`
@@ -77,4 +77,4 @@ Load order:
 - Default server URL: `http://127.0.0.1:9377`.
 - Proxy values are masked in status output.
 - Upstream Camofox emits structured JSON logs and supports anonymized crash/hang telemetry; this extension exposes recent logs via `/camofox-logs` and `camofox_logs`.
-- Session tracing is supported upstream via `trace: true` on `camofox_create_tab`; this extension now exposes trace listing, download, and deletion helpers.
+- Session tracing is enabled by default on `camofox_create_tab` unless you explicitly pass `trace: false`; this extension also exposes trace listing, download, and deletion helpers.
