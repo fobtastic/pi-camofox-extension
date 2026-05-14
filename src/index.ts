@@ -23,7 +23,15 @@ const ENV_FILE_CANDIDATES = [
 	join(process.cwd(), ".env"),
 	join(process.cwd(), ".env.local"),
 ];
-const MANAGED_ENV_KEYS = ["CAMOFOX_BASE_URL", "CAMOFOX_PROXY_URL", "CAMOFOX_PROXY_BYPASS"] as const;
+const MANAGED_ENV_KEYS = [
+	"CAMOFOX_BASE_URL",
+	"CAMOFOX_PROXY_URL",
+	"CAMOFOX_PROXY_BYPASS",
+	"CAMOFOX_CRASH_REPORT_ENABLED",
+	"CAMOFOX_CRASH_REPORT_URL",
+	"CAMOFOX_CRASH_REPORT_REPO",
+	"CAMOFOX_CRASH_REPORT_RATE_LIMIT",
+] as const;
 
 let serverOwnedBySession = false;
 
@@ -108,6 +116,46 @@ function getProxyConfig() {
 	};
 }
 
+function getTelemetryConfig() {
+	const env = resolveEnv();
+	return {
+		enabled: env.CAMOFOX_CRASH_REPORT_ENABLED !== "false",
+		url: env.CAMOFOX_CRASH_REPORT_URL?.trim() || "https://camofox-telemetry.askjo.workers.dev/report",
+		repo: env.CAMOFOX_CRASH_REPORT_REPO?.trim() || "jo-inc/camofox-browser",
+		rateLimitPerHour: Number(env.CAMOFOX_CRASH_REPORT_RATE_LIMIT?.trim() || "10"),
+	};
+}
+
+async function getRecentLogs(limit = 50) {
+	try {
+		const raw = await readFile(LOG_PATH, "utf8");
+		const lines = raw.trim().split(/\r?\n/).filter(Boolean);
+		const recent = lines.slice(-Math.max(1, limit));
+		const entries = recent.map((line) => {
+			try {
+				return JSON.parse(line) as Record<string, unknown>;
+			} catch {
+				return { level: "raw", msg: line };
+			}
+		});
+		return {
+			available: true,
+			entries,
+			text: recent.join("\n"),
+			errorCount: entries.filter((entry) => entry.level === "error").length,
+			warnCount: entries.filter((entry) => entry.level === "warn").length,
+		};
+	} catch {
+		return {
+			available: false,
+			entries: [] as Record<string, unknown>[],
+			text: "",
+			errorCount: 0,
+			warnCount: 0,
+		};
+	}
+}
+
 function requireTarget(params: { ref?: string; selector?: string }) {
 	if (!params.ref && !params.selector) {
 		throw new Error("Expected either ref or selector");
@@ -148,6 +196,8 @@ async function installCamofox(pi: ExtensionAPI, signal?: AbortSignal, force = fa
 
 async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 	const proxy = getProxyConfig();
+	const telemetry = getTelemetryConfig();
+	const logs = await getRecentLogs(25);
 	let pid: number | undefined;
 	try {
 		pid = Number((await readFile(PID_PATH, "utf8")).trim());
@@ -170,6 +220,17 @@ async function getServerStatus(pi: ExtensionAPI, signal?: AbortSignal) {
 		installDir: INSTALL_DIR,
 		proxyEnabled: !!proxy,
 		proxy: proxy?.masked,
+		telemetry,
+		logs: {
+			available: logs.available,
+			errorCount: logs.errorCount,
+			warnCount: logs.warnCount,
+			lastMessages: logs.entries.slice(-5).map((entry) => {
+				const level = typeof entry.level === "string" ? entry.level : "info";
+				const msg = typeof entry.msg === "string" ? entry.msg : JSON.stringify(entry);
+				return `${level}: ${msg}`;
+			}),
+		},
 	};
 }
 
@@ -242,6 +303,8 @@ async function refreshDisplay(pi: ExtensionAPI, ctx: ExtensionContext) {
 		`Session ownership: ${serverOwnedBySession ? "session-owned" : "shared/external"}`,
 		`Base URL: ${status.baseUrl}`,
 		`Proxy: ${status.proxyEnabled ? status.proxy : "disabled"}`,
+		`Telemetry: ${status.telemetry.enabled ? `enabled -> ${status.telemetry.repo}` : "disabled"}`,
+		`Recent logs: ${status.logs.available ? `${status.logs.warnCount} warn / ${status.logs.errorCount} error` : "unavailable"}`,
 		`Env sources: ~/.env, extension .env, cwd .env, exported env overrides`,
 		`Log: ${status.logPath}`,
 	]);
@@ -317,6 +380,16 @@ export default function camofoxExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("camofox-logs", {
+		description: "Show recent structured Camofox server logs",
+		handler: async (args, ctx) => {
+			const limit = Math.max(1, Math.min(200, Number(args?.trim() || "50") || 50));
+			const logs = await getRecentLogs(limit);
+			await refreshDisplay(pi, ctx);
+			ctx.ui.notify(logs.available ? logs.text || "No log lines yet" : `No log file at ${LOG_PATH}`, "info");
+		},
+	});
+
 	pi.registerTool({
 		name: "camofox_setup",
 		label: "Camofox Setup",
@@ -364,6 +437,20 @@ export default function camofoxExtension(pi: ExtensionAPI) {
 			const result = await getServerStatus(pi, signal);
 			await refreshDisplay(pi, ctx);
 			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "camofox_logs",
+		label: "Camofox Logs",
+		description: "Read recent structured Camofox server logs for debugging and telemetry visibility.",
+		parameters: Type.Object({ limit: Type.Optional(Type.Number()) }),
+		async execute(_id, params) {
+			const logs = await getRecentLogs(Math.max(1, Math.min(200, params.limit ?? 50)));
+			return {
+				content: [{ type: "text", text: logs.available ? logs.text || "No log lines yet" : `No log file at ${LOG_PATH}` }],
+				details: logs,
+			};
 		},
 	});
 

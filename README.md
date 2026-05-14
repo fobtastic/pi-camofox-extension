@@ -7,12 +7,14 @@ Open-source pi extension for installing and using [camofox-browser](https://gith
 - `/camofox-start` - start the local camofox server
 - `/camofox-stop` - stop it
 - `/camofox-status` - inspect install/server state
+- `/camofox-logs [limit]` - show recent structured server logs
 
 ## Tools
 - `camofox_setup`
 - `camofox_start`
 - `camofox_stop`
 - `camofox_status`
+- `camofox_logs`
 - `camofox_create_tab`
 - `camofox_snapshot`
 - `camofox_click`
@@ -51,6 +53,10 @@ Supported variables:
 - `CAMOFOX_BASE_URL`
 - `CAMOFOX_PROXY_URL`
 - `CAMOFOX_PROXY_BYPASS`
+- `CAMOFOX_CRASH_REPORT_ENABLED`
+- `CAMOFOX_CRASH_REPORT_URL`
+- `CAMOFOX_CRASH_REPORT_REPO`
+- `CAMOFOX_CRASH_REPORT_RATE_LIMIT`
 
 Load order:
 1. `~/.env` / `~/.env.local`
@@ -64,3 +70,4 @@ Load order:
 - First install/start may download the Camoufox browser payload via `camoufox-js`.
 - Default server URL: `http://127.0.0.1:9377`.
 - Proxy values are masked in status output.
+- Upstream Camofox emits structured JSON logs and supports anonymized crash/hang telemetry; this extension now exposes recent logs via `/camofox-logs` and `camofox_logs`.
